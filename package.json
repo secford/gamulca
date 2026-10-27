@@ -1,18 +1,13 @@
 {
   "name": "guesslang-game",
-  "version": "1.1.0",
+  "version": "2.0.0",
   "private": true,
-  "description": "Multiplayer network game 'Guess programming language'",
-  "main": "server/index.js",
+  "description": "CodeGuess — static quiz game for GitHub Pages",
   "scripts": {
-    "start": "node server/index.js",
-    "dev": "node server/index.js"
+    "start": "node server.js",
+    "dev": "node server.js"
   },
   "engines": {
     "node": ">=18"
-  },
-  "dependencies": {
-    "express": "^4.22.3",
-    "socket.io": "^4.8.4"
   }
 }

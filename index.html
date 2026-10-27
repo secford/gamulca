@@ -4,12 +4,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="CodeGuess — сетевая игра: угадай язык программирования, команду, SQL-запрос и многое другое.">
-    <title>CodeGuess • Мультиплеер</title>
+    <meta name="description" content="CodeGuess — статическая викторина для GitHub Pages: угадай язык программирования, команду, SQL-запрос и многое другое. Играйте против ботов.">
+    <title>CodeGuess • Игра с ботами</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="./static\style.css">
+    <link rel="stylesheet" href="./static/style.css">
 </head>
 
 <body>
@@ -18,15 +18,11 @@
     <div class="bg-orb orb-2"></div>
     <div class="bg-grid"></div>
 
-    <div id="connectionBanner" class="connection-banner" role="status" style="display:none;">
-        Соединение потеряно. Переподключение…
-    </div>
-
     <div class="container">
         <header class="hero">
-            <div class="hero-pill">CODEGUESS • NETWORK</div>
+            <div class="hero-pill">CODEGUESS • GITHUB PAGES</div>
             <h1 class="hero-title">CODE<span class="glow">GUESS</span></h1>
-            <p class="hero-desc">Языки • Linux • Git • SQL • Docker • Алгоритмы • Web</p>
+            <p class="hero-desc">Языки • Linux • Git • SQL • Docker • Алгоритмы • Web • Игра с ботами</p>
         </header>
 
         <!-- LOBBY -->
@@ -34,7 +30,7 @@
             <div class="lobby-layout">
                 <div class="card">
                     <div class="card-head">
-                        <h2>Вход</h2>
+                        <h2>Игрок</h2>
                         <span class="dot pulse"></span>
                     </div>
                     <div class="join-row">
@@ -43,8 +39,8 @@
                     </div>
                     <p id="joinError" class="join-error" role="alert"></p>
                     <div class="meta-line">
-                        <span>Сервер</span>
-                        <code id="serverAddr">—</code>
+                        <span>Платформа</span>
+                        <code id="serverAddr">GitHub Pages</code>
                     </div>
                     <div class="subhead">Игроки (<span id="playersCount">0</span>)</div>
                     <div id="playersList" class="players"></div>
@@ -89,6 +85,18 @@
                     </div>
 
                     <div class="setting-group">
+                        <label>Боты</label>
+                        <div class="seg" data-setting="bots">
+                            <button class="seg-item" data-value="1">1</button>
+                            <button class="seg-item" data-value="2">2</button>
+                            <button class="seg-item active" data-value="3">3</button>
+                            <button class="seg-item" data-value="5">5</button>
+                            <button class="seg-item" data-value="7">7</button>
+                            <button class="seg-item" data-value="11">11</button>
+                        </div>
+                    </div>
+
+                    <div class="setting-group">
                         <label>Категории</label>
                         <div class="checks">
                             <label class="check"><input type="checkbox" data-cat="langs" checked> Языки программирования</label>
@@ -110,6 +118,8 @@
                             <button class="seg-item" data-value="vapor">Vaporwave</button>
                         </div>
                     </div>
+
+                    <p class="hint">Игра работает в браузере — сервер не нужен</p>
                 </div>
             </div>
         </section>
@@ -205,8 +215,7 @@
         </section>
     </div>
 
-    <script src="/socket.io/socket.io.js"></script>
-    <script src="app.js"></script>
+    <script src="./client/app.js" defer></script>
 </body>
 
 </html>

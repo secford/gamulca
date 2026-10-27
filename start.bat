@@ -1,7 +1,6 @@
 @echo off
-echo Запуск игры "Угадай язык программирования"
-echo Локальный адрес: http://localhost:8080
-echo Для игры по сети используйте IP этого компьютера и порт 8080
+echo CodeGuess: http://localhost:8080
+echo Press Ctrl+C to stop.
 echo.
-node server/index.js
+node server.js
 pause
