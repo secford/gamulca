@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="ru" data-theme="neon">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="CodeGuess — сетевая игра: угадай язык программирования, команду, SQL-запрос и многое другое.">
+    <title>CodeGuess • Мультиплеер</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <div class="bg-noise"></div>
+    <div class="bg-orb orb-1"></div>
+    <div class="bg-orb orb-2"></div>
+    <div class="bg-grid"></div>
+
+    <div id="connectionBanner" class="connection-banner" role="status" style="display:none;">
+        Соединение потеряно. Переподключение…
+    </div>
+
+    <div class="container">
+        <header class="hero">
+            <div class="hero-pill">CODEGUESS • NETWORK</div>
+            <h1 class="hero-title">CODE<span class="glow">GUESS</span></h1>
+            <p class="hero-desc">Языки • Linux • Git • SQL • Docker • Алгоритмы • Web</p>
+        </header>
+
+        <!-- LOBBY -->
+        <section id="lobbyScreen" class="screen">
+            <div class="lobby-layout">
+                <div class="card">
+                    <div class="card-head">
+                        <h2>Вход</h2>
+                        <span class="dot pulse"></span>
+                    </div>
+                    <div class="join-row">
+                        <input id="playerName" class="input" maxlength="16" placeholder="Имя" autocomplete="nickname">
+                        <button id="joinBtn" class="btn btn-primary">ВОЙТИ</button>
+                    </div>
+                    <p id="joinError" class="join-error" role="alert"></p>
+                    <div class="meta-line">
+                        <span>Сервер</span>
+                        <code id="serverAddr">—</code>
+                    </div>
+                    <div class="subhead">Игроки (<span id="playersCount">0</span>)</div>
+                    <div id="playersList" class="players"></div>
+                    <button id="startBtn" class="btn btn-accent" style="display:none;">НАЧАТЬ ИГРУ</button>
+                    <p id="hostNote" class="hint">Войдите, чтобы играть</p>
+                </div>
+
+                <div class="card">
+                    <div class="card-head">
+                        <h2>Настройки</h2>
+                        <span id="hostTag" class="tag" style="display:none;">ХОСТ</span>
+                    </div>
+
+                    <div class="setting-group">
+                        <label>Режим</label>
+                        <div class="seg" data-setting="mode">
+                            <button class="seg-item active" data-value="classic" title="15 вопросов, очки за скорость и серии">Классика</button>
+                            <button class="seg-item" data-value="blitz" title="10 вопросов по 10 секунд, x1.5 очков">Блиц</button>
+                            <button class="seg-item" data-value="survival" title="Ошибка или таймаут — выбывание">Выживание</button>
+                        </div>
+                        <p id="modeDesc" class="mode-desc">15 вопросов • база + бонус за скорость</p>
+                    </div>
+
+                    <div class="setting-group">
+                        <label>Сложность</label>
+                        <div class="seg" data-setting="difficulty">
+                            <button class="seg-item" data-value="easy" title="Только базовые примеры">Лёгкий</button>
+                            <button class="seg-item active" data-value="medium" title="Базовые + средние">Средний</button>
+                            <button class="seg-item" data-value="hard" title="Больше редких языков/конструкций">Сложный</button>
+                        </div>
+                    </div>
+
+                    <div class="setting-group">
+                        <label>Время на ответ</label>
+                        <div class="seg" data-setting="roundTime">
+                            <button class="seg-item" data-value="10">10с</button>
+                            <button class="seg-item active" data-value="15">15с</button>
+                            <button class="seg-item" data-value="20">20с</button>
+                            <button class="seg-item" data-value="25">25с</button>
+                            <button class="seg-item" data-value="30">30с</button>
+                        </div>
+                    </div>
+
+                    <div class="setting-group">
+                        <label>Категории</label>
+                        <div class="checks">
+                            <label class="check"><input type="checkbox" data-cat="langs" checked> Языки программирования</label>
+                            <label class="check"><input type="checkbox" data-cat="linux" checked> Linux / CLI</label>
+                            <label class="check"><input type="checkbox" data-cat="git" checked> Git</label>
+                            <label class="check"><input type="checkbox" data-cat="db" checked> SQL / Базы данных</label>
+                            <label class="check"><input type="checkbox" data-cat="docker" checked> Docker / Kubernetes</label>
+                            <label class="check"><input type="checkbox" data-cat="algo" checked> Алгоритмы</label>
+                            <label class="check"><input type="checkbox" data-cat="web" checked> Web / HTTP</label>
+                        </div>
+                    </div>
+
+                    <div class="setting-group">
+                        <label>Тема</label>
+                        <div class="seg" data-setting="theme">
+                            <button class="seg-item active" data-value="neon">Неон</button>
+                            <button class="seg-item" data-value="cyber">Кибер</button>
+                            <button class="seg-item" data-value="matrix">Матрица</button>
+                            <button class="seg-item" data-value="vapor">Vaporwave</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- GAME -->
+        <section id="gameScreen" class="screen" style="display:none;">
+            <div class="game-bar">
+                <div class="bar-group">
+                    <div class="bar-pill">ВОПРОС <span id="questionNum">1</span> / <span id="totalQuestions">15</span></div>
+                    <div class="bar-pill" id="catPill">ЯЗЫКИ</div>
+                    <div class="bar-pill" id="diffPill">СРЕДНИЙ</div>
+                    <div class="bar-pill" id="modePill">КЛАССИКА</div>
+                    <div class="bar-pill alive-pill" id="alivePill" style="display:none;">ЖИВЫХ: 0</div>
+                </div>
+                <div class="timer-box">
+                    <div class="timer-circle">
+                        <svg>
+                            <circle cx="28" cy="28" r="24"></circle>
+                            <circle cx="28" cy="28" r="24" id="timerProg"></circle>
+                        </svg>
+                        <div class="timer-num"><span id="timer">15</span></div>
+                    </div>
+                    <span class="timer-text">СЕК</span>
+                </div>
+            </div>
+
+            <div id="gameStatusBanner" class="status-banner" role="status" style="display:none;"></div>
+
+            <div class="card question-card">
+                <div class="card-head">
+                    <h2>Укажи правильный ответ</h2>
+                    <span class="tag">1–4 / A–D</span>
+                </div>
+                <div class="code-frame">
+                    <div class="frame-head">
+                        <div class="dots"><span></span><span></span><span></span></div>
+                        <span class="frame-title">snippet</span>
+                    </div>
+                    <pre class="code-pre"><code id="codeBlock"></code></pre>
+                </div>
+            </div>
+
+            <div class="answers">
+                <button class="answer-btn" data-index="0"><span class="ans-key">A</span><span class="ans-text" id="option0"></span></button>
+                <button class="answer-btn" data-index="1"><span class="ans-key">B</span><span class="ans-text" id="option1"></span></button>
+                <button class="answer-btn" data-index="2"><span class="ans-key">C</span><span class="ans-text" id="option2"></span></button>
+                <button class="answer-btn" data-index="3"><span class="ans-key">D</span><span class="ans-text" id="option3"></span></button>
+            </div>
+
+            <div id="answerToast" class="answer-toast" role="status" aria-live="polite" style="display:none;"></div>
+
+            <div class="card">
+                <div class="card-head">
+                    <h2>Таблица лидеров</h2>
+                    <span class="tag tag-live">LIVE</span>
+                </div>
+                <div id="gamePlayersList" class="board"></div>
+            </div>
+        </section>
+
+        <!-- ROUND END -->
+        <section id="roundEndScreen" class="screen" style="display:none;">
+            <div class="overlay">
+                <div class="modal">
+                    <h2 class="modal-title">РАУНД ЗАВЕРШЁН</h2>
+                    <p class="modal-sub">ПРАВИЛЬНЫЙ ОТВЕТ</p>
+                    <div class="correct-box" id="correctAnswerText"></div>
+                    <p id="roundResultText" class="round-result"></p>
+                    <div id="roundBreakdown" class="breakdown"></div>
+                    <div id="explainBox" class="explain-box" style="display:none;">
+                        <span class="explain-label">ПОЧЕМУ</span>
+                        <p id="explainText"></p>
+                    </div>
+                    <p class="modal-foot">Следующий вопрос…</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- GAME OVER -->
+        <section id="gameOverScreen" class="screen" style="display:none;">
+            <div class="overlay">
+                <div class="modal modal-big">
+                    <div class="cup">🏆</div>
+                    <h2 class="modal-title">ИТОГИ</h2>
+                    <p id="gameOverSub" class="modal-sub">РЕЗУЛЬТАТЫ</p>
+                    <div id="finalLeaderboard" class="podium-list"></div>
+                    <div class="modal-actions">
+                        <button id="rematchBtn" class="btn btn-accent" style="display:none;">ИГРАТЬ СНОВА</button>
+                        <button id="restartBtn" class="btn btn-primary">В ЛОББИ</button>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="app.js"></script>
+</body>
+
+</html>
