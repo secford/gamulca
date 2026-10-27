@@ -115,6 +115,6 @@ cloudflared tunnel --url http://localhost:8080
 server/index.js       — логика комнаты, раундов, очков и режимов
 server/questions.json — база вопросов
 client/app.js         — клиентская логика и интерфейс
-templates/index.html  — разметка
+index.html            — разметка
 static/style.css      — стили и темы
 ```

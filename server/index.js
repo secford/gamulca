@@ -18,7 +18,7 @@ app.get('/healthz', (req, res) => {
 });
 
 app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, '../templates/index.html'));
+  res.sendFile(path.join(__dirname, '../index.html'));
 });
 
 const rawQuestions = require('./questions.json');
