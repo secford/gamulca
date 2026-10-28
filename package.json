@@ -2,7 +2,7 @@
   "name": "guesslang-game",
   "version": "2.0.0",
   "private": true,
-  "description": "CodeGuess — static quiz game for GitHub Pages",
+  "description": "CodeGuess — online P2P quiz game for GitHub Pages",
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js"

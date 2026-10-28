@@ -28,11 +28,10 @@ const MIN_PLAYERS = 2;
 const ROUND_REVEAL_MS = 2500;
 const START_DELAY_MS = 900;
 
-const BOT_NAMES = [
-    'Ada', 'Linus', 'Grace', 'Alan', 'Margaret', 'Dennis', 'Barbara', 'Ken',
-    'Guido', 'Yukihiro', 'Brendan', 'Katherine', 'Edsger', 'Radia', 'James',
-    'Anita', 'Tim', 'Sophie', 'Donald', 'Frances'
-];
+const ROOM_PREFIX = 'codeguess-v2-';
+const ROOM_CODE_LENGTH = 6;
+const ROOM_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const JOIN_TIMEOUT_MS = 12000;
 
 const lobbyScreen = document.getElementById('lobbyScreen');
 const gameScreen = document.getElementById('gameScreen');
@@ -40,7 +39,15 @@ const roundEndScreen = document.getElementById('roundEndScreen');
 const gameOverScreen = document.getElementById('gameOverScreen');
 
 const playerNameInput = document.getElementById('playerName');
-const joinBtn = document.getElementById('joinBtn');
+const roomCodeInput = document.getElementById('roomCodeInput');
+const joinRoomBtn = document.getElementById('joinRoomBtn');
+const createRoomBtn = document.getElementById('createRoomBtn');
+const roomJoinRow = document.getElementById('roomJoinRow');
+const roomPanel = document.getElementById('roomPanel');
+const roomCodeDisplay = document.getElementById('roomCodeDisplay');
+const copyLinkBtn = document.getElementById('copyLinkBtn');
+const leaveRoomBtn = document.getElementById('leaveRoomBtn');
+const connectionBanner = document.getElementById('connectionBanner');
 const joinError = document.getElementById('joinError');
 const startBtn = document.getElementById('startBtn');
 const playersList = document.getElementById('playersList');
@@ -83,16 +90,27 @@ let settings = {
     difficulty: 'medium',
     roundTime: 15,
     categories: ['langs', 'linux', 'git', 'db', 'docker', 'algo', 'web'],
-    theme: 'neon',
-    bots: 3
+    theme: 'neon'
 };
 
 let joined = false;
+let joining = false;
+let isHost = false;
 let myId = null;
 let myName = '';
 let hostId = null;
 let isSpectator = false;
 let myAlive = true;
+
+let peer = null;
+let connections = [];
+let hostConn = null;
+let roomCode = '';
+let clockOffset = 0;
+let joinTimeout = null;
+let gamePhase = 'lobby';
+let lastQuestionKey = '';
+let guestSelectedIndex = null;
 
 let gameInProgress = false;
 let gameStarted = false;
@@ -116,7 +134,6 @@ let startDelayTimer = null;
 let roundRevealTimer = null;
 let toastTimer = null;
 let errorTimer = null;
-let botTimers = [];
 
 function storageGet(key) {
     try {
@@ -215,6 +232,7 @@ function applySettings(next) {
     settings.theme = theme;
     document.documentElement.dataset.theme = theme;
     gameMode = settings.mode || gameMode;
+    currentMode = MODES[gameMode] || currentMode;
 
     document.querySelectorAll('.seg').forEach(group => {
         const key = group.getAttribute('data-setting');
@@ -243,12 +261,19 @@ function setStatusBanner(text) {
 
 function updateHostUI(list) {
     const active = list.filter(p => !p.spectator);
+    hostTag.textContent = isHost ? 'ХОСТ' : 'ГОСТЬ';
     hostTag.style.display = joined ? 'inline-flex' : 'none';
-    setSettingsLocked(gameInProgress);
+    setSettingsLocked(gameInProgress || (joined && !isHost));
 
     if (!joined) {
         startBtn.style.display = 'none';
-        hostNote.textContent = 'Войдите, чтобы играть';
+        hostNote.textContent = 'Создайте комнату или войдите по коду';
+        return;
+    }
+
+    if (!isHost) {
+        startBtn.style.display = 'none';
+        hostNote.textContent = gameInProgress ? 'Игра идёт…' : 'Ждём, пока хост начнёт игру';
         return;
     }
 
@@ -260,7 +285,7 @@ function updateHostUI(list) {
     } else if (questionsDB.length === 0) {
         hostNote.textContent = 'Загрузка вопросов…';
     } else if (active.length < MIN_PLAYERS) {
-        hostNote.textContent = 'Добавьте хотя бы одного бота';
+        hostNote.textContent = 'Позовите друга по ссылке';
     } else {
         hostNote.textContent = 'Вы — хост: можно начинать';
     }
@@ -302,7 +327,6 @@ function renderPlayers(list) {
         const initial = escapeHtml((p.name.trim().charAt(0) || '?').toUpperCase());
         const tags = [];
         if (p.id === hostId) tags.push('<span class="tag tag-host">ХОСТ</span>');
-        if (p.isBot) tags.push('<span class="tag tag-small tag-bot">БОТ</span>');
         if (p.id === myId) tags.push('<span class="tag tag-small">ВЫ</span>');
 
         item.innerHTML = `
@@ -453,22 +477,16 @@ function resetAnswerButtons() {
     });
 }
 
-function clearBotTimers() {
-    botTimers.forEach(timer => clearTimeout(timer));
-    botTimers = [];
-}
-
 function clearAllTimers() {
     if (questionTimer) { clearTimeout(questionTimer); questionTimer = null; }
     if (nextRoundTimer) { clearTimeout(nextRoundTimer); nextRoundTimer = null; }
     if (startDelayTimer) { clearTimeout(startDelayTimer); startDelayTimer = null; }
-    clearBotTimers();
 }
 
-function createLobbyPlayers() {
-    const me = {
-        id: 'me',
-        name: myName,
+function makePlayer(id, name) {
+    return {
+        id,
+        name,
         score: 0,
         streak: 0,
         alive: true,
@@ -476,69 +494,781 @@ function createLobbyPlayers() {
         roundPoints: 0,
         roundAnswer: null,
         roundCorrect: false,
-        spectator: false,
-        isBot: false,
-        skill: 1
+        spectator: false
     };
-    players = [me];
-    addBots(settings.bots);
 }
 
-function addBots(count) {
+function randomId(prefix) {
+    return prefix + Math.random().toString(36).slice(2, 10);
+}
+
+function generateRoomCode() {
+    const bytes = new Uint32Array(ROOM_CODE_LENGTH);
+    if (window.crypto && crypto.getRandomValues) {
+        crypto.getRandomValues(bytes);
+    }
+    let code = '';
+    for (let i = 0; i < ROOM_CODE_LENGTH; i++) {
+        const value = bytes[i] || Math.floor(Math.random() * 0xffffffff);
+        code += ROOM_CODE_CHARS[value % ROOM_CODE_CHARS.length];
+    }
+    return code;
+}
+
+function normalizeRoomCode(value) {
+    return String(value || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, ROOM_CODE_LENGTH);
+}
+
+function uniqueName(base) {
     const used = new Set(players.map(p => p.name.toLowerCase()));
-    const pool = shuffle(BOT_NAMES.slice());
-    const total = Math.max(1, Math.min(11, Number(count) || 1));
+    if (!used.has(base.toLowerCase())) return base;
+    let suffix = 2;
+    while (used.has(`${base} ${suffix}`.toLowerCase())) suffix += 1;
+    return `${base} ${suffix}`.slice(0, 16);
+}
 
-    for (let i = 0; i < total; i++) {
-        const base = pool[i % pool.length];
-        let name = base;
-        let suffix = 2;
-        while (used.has(name.toLowerCase())) {
-            name = `${base} ${suffix}`;
-            suffix += 1;
-        }
-        used.add(name.toLowerCase());
-
-        players.push({
-            id: `bot-${i + 1}-${Math.random().toString(36).slice(2, 6)}`,
-            name,
-            score: 0,
-            streak: 0,
-            alive: true,
-            answered: false,
-            roundPoints: 0,
-            roundAnswer: null,
-            roundCorrect: false,
-            spectator: false,
-            isBot: true,
-            skill: 0.4 + Math.random() * 0.5
-        });
+function setConnectionBanner(text) {
+    if (text) {
+        connectionBanner.textContent = text;
+        connectionBanner.style.display = 'block';
+    } else {
+        connectionBanner.style.display = 'none';
     }
 }
 
-function rebuildBots() {
-    const me = players.find(p => p.id === myId);
-    players = me ? [me] : [];
-    addBots(settings.bots);
+function setStatus(text) {
+    serverAddr.textContent = text;
 }
 
-function joinGame() {
-    if (joined) return;
+function updateUrlRoom(code) {
+    const url = new URL(location.href);
+    if (code) url.searchParams.set('room', code);
+    else url.searchParams.delete('room');
+    try {
+        history.replaceState(null, '', url.toString());
+    } catch {}
+}
+
+function updateRoomUI() {
+    const inRoom = joined;
+    roomPanel.style.display = inRoom ? 'flex' : 'none';
+    roomJoinRow.style.display = inRoom ? 'none' : 'flex';
+    createRoomBtn.style.display = inRoom ? 'none' : 'inline-flex';
+    playerNameInput.disabled = inRoom || joining;
+    roomCodeInput.disabled = inRoom || joining;
+    joinRoomBtn.disabled = inRoom || joining;
+    createRoomBtn.disabled = inRoom || joining;
+    roomCodeDisplay.textContent = roomCode || '------';
+    setStatus(inRoom ? (isHost ? 'Хост комнаты' : 'Гость комнаты') : 'Не в комнате');
+}
+
+function peerErrorMessage(err) {
+    const type = err && err.type;
+    if (type === 'peer-unavailable') return 'Комната не найдена или хост уже вышел';
+    if (type === 'unavailable-id') return 'Код комнаты занят, попробуйте снова';
+    if (type === 'network' || type === 'server-error') return 'Нет связи с сервером комнат. Проверьте интернет.';
+    if (type === 'browser-incompatible') return 'Браузер не поддерживает WebRTC';
+    if (type === 'webrtc') return 'Не удалось установить P2P-соединение';
+    return 'Ошибка соединения. Попробуйте ещё раз.';
+}
+
+function sendTo(playerId, message) {
+    const conn = connections.find(c => c.peer === playerId);
+    if (conn && conn.open) {
+        try {
+            conn.send(message);
+        } catch {}
+    }
+}
+
+function serializePlayers() {
+    return players.map(p => ({
+        id: p.id,
+        name: p.name,
+        score: p.score,
+        streak: p.streak,
+        alive: p.alive,
+        answered: p.answered,
+        roundPoints: p.roundPoints,
+        roundAnswer: revealRound ? p.roundAnswer : null,
+        roundCorrect: revealRound ? p.roundCorrect : false,
+        spectator: p.spectator
+    }));
+}
+
+function buildSnapshot() {
+    return {
+        t: 'state',
+        phase: gamePhase,
+        code: roomCode,
+        hostId,
+        settings: {
+            mode: settings.mode,
+            difficulty: settings.difficulty,
+            roundTime: settings.roundTime,
+            categories: settings.categories.slice(),
+            theme: settings.theme
+        },
+        players: serializePlayers(),
+        game: {
+            mode: currentMode.id,
+            questionNum: currentIndex + 1,
+            total: questionsQueue.length,
+            played: questionsPlayed,
+            question: currentQuestion ? {
+                cat: currentQuestion.cat,
+                diff: currentQuestion.diff,
+                code: currentQuestion.code,
+                options: currentQuestion.options.slice(),
+                timeLimit: currentQuestion.timeLimit
+            } : null,
+            reveal: revealRound,
+            correctIndex: revealRound && currentQuestion ? currentQuestion.correct : null,
+            explain: revealRound && currentQuestion ? currentQuestion.explain : '',
+            endsAt: roundActive ? roundDeadline : null,
+            serverNow: Date.now()
+        }
+    };
+}
+
+function broadcastState() {
+    if (!isHost) return;
+    const snapshot = buildSnapshot();
+    connections.forEach(conn => {
+        if (conn.open) {
+            try {
+                conn.send(snapshot);
+            } catch {}
+        }
+    });
+}
+
+function setupHostConnection(conn) {
+    connections.push(conn);
+    conn.on('data', data => handleHostMessage(conn, data));
+    const drop = () => removeGuest(conn.peer);
+    conn.on('close', drop);
+    conn.on('error', drop);
+}
+
+function handleHostMessage(conn, data) {
+    if (!data || typeof data !== 'object') return;
+
+    if (data.t === 'join') {
+        if (players.some(p => p.id === conn.peer)) return;
+        const name = uniqueName(sanitizeName(data.name) || 'Игрок');
+        const spectator = gamePhase !== 'lobby';
+        players.push({ ...makePlayer(conn.peer, name), spectator });
+        try {
+            conn.send({ t: 'welcome', id: conn.peer, code: roomCode });
+        } catch {}
+        handlePlayers(players);
+        broadcastState();
+        return;
+    }
+
+    if (data.t === 'answer') {
+        const player = getPlayer(conn.peer);
+        if (player) submitAnswer(player, Number(data.index), true);
+        return;
+    }
+
+    if (data.t === 'leave') {
+        removeGuest(conn.peer);
+    }
+}
+
+function removeGuest(id) {
+    const index = players.findIndex(p => p.id === id);
+    if (index >= 0) {
+        players.splice(index, 1);
+        connections = connections.filter(c => c.peer !== id);
+        if (roundActive) checkRoundEnd();
+        handlePlayers(players);
+        broadcastState();
+    } else {
+        connections = connections.filter(c => c.peer !== id);
+    }
+}
+
+function startHostPeer(attempt) {
+    if (attempt >= 3) {
+        joining = false;
+        updateRoomUI();
+        setStatus('Не в комнате');
+        return showError('Не удалось создать комнату. Попробуйте ещё раз.');
+    }
+
+    const code = generateRoomCode();
+    const candidate = new Peer(ROOM_PREFIX + code, { debug: 0 });
+    let opened = false;
+    let retried = false;
+
+    candidate.on('open', () => {
+        if (opened) {
+            setConnectionBanner('');
+            return;
+        }
+        opened = true;
+        peer = candidate;
+        isHost = true;
+        joined = true;
+        joining = false;
+        roomCode = code;
+        myId = randomId('host-');
+        hostId = myId;
+        players = [makePlayer(myId, myName)];
+
+        peer.on('disconnected', () => {
+            setConnectionBanner('Связь с сервером комнат потеряна, переподключаемся…');
+            try {
+                peer.reconnect();
+            } catch {}
+        });
+        peer.on('close', () => setConnectionBanner('Комната закрыта'));
+        peer.on('error', err => {
+            if (err && err.type !== 'peer-unavailable') setConnectionBanner(peerErrorMessage(err));
+        });
+
+        updateRoomUI();
+        handlePlayers(players);
+        broadcastState();
+        setConnectionBanner('');
+        showError('');
+    });
+
+    candidate.on('connection', setupHostConnection);
+
+    candidate.on('error', err => {
+        if (!opened && !retried && (err.type === 'unavailable-id' || err.type === 'network')) {
+            retried = true;
+            try {
+                candidate.destroy();
+            } catch {}
+            setTimeout(() => startHostPeer(attempt + 1), 600);
+            return;
+        }
+
+        if (!opened) {
+            joining = false;
+            updateRoomUI();
+            setStatus('Не в комнате');
+            showError(peerErrorMessage(err));
+            try {
+                candidate.destroy();
+            } catch {}
+        }
+    });
+}
+
+function createRoom() {
+    if (joined || joining) return;
     const name = sanitizeName(playerNameInput.value);
     if (!name) return showError('Введите имя');
+    if (typeof Peer === 'undefined') return showError('Не удалось загрузить PeerJS');
 
     myName = name;
-    myId = 'me';
-    hostId = 'me';
-    joined = true;
     storageSet('cg_name', myName);
-
-    joinBtn.disabled = true;
-    playerNameInput.disabled = true;
+    joining = true;
     showError('');
+    updateRoomUI();
+    setStatus('Создаём комнату…');
 
-    createLobbyPlayers();
+    try {
+        startHostPeer(0);
+    } catch {
+        joining = false;
+        updateRoomUI();
+        showError('Не удалось создать комнату. Попробуйте ещё раз.');
+    }
+}
+
+function joinRoom() {
+    if (joined || joining) return;
+    const name = sanitizeName(playerNameInput.value);
+    if (!name) return showError('Введите имя');
+    const code = normalizeRoomCode(roomCodeInput.value);
+    if (code.length !== ROOM_CODE_LENGTH) return showError('Введите код из 6 символов');
+    if (typeof Peer === 'undefined') return showError('Не удалось загрузить PeerJS');
+
+    myName = name;
+    storageSet('cg_name', myName);
+    joining = true;
+    showError('');
+    updateRoomUI();
+    setStatus('Подключаемся…');
+
+    let connected = false;
+
+    if (joinTimeout) clearTimeout(joinTimeout);
+    joinTimeout = setTimeout(() => {
+        joinTimeout = null;
+        if (connected) return;
+        showError('Не удалось подключиться к комнате. Проверьте код и попробуйте снова.');
+        cleanupConnection();
+        updateRoomUI();
+        setStatus('Не в комнате');
+    }, JOIN_TIMEOUT_MS);
+
+    try {
+        peer = new Peer({ debug: 0 });
+    } catch {
+        if (joinTimeout) { clearTimeout(joinTimeout); joinTimeout = null; }
+        joining = false;
+        updateRoomUI();
+        return showError('Браузер не поддерживает WebRTC');
+    }
+
+    peer.on('open', id => {
+        myId = id;
+        hostConn = peer.connect(ROOM_PREFIX + code, { reliable: true });
+
+        hostConn.on('open', () => {
+            connected = true;
+            if (joinTimeout) { clearTimeout(joinTimeout); joinTimeout = null; }
+            try {
+                hostConn.send({ t: 'join', name });
+            } catch {}
+            setStatus('Подключено');
+        });
+
+        hostConn.on('data', handleGuestMessage);
+        hostConn.on('close', handleHostLost);
+        hostConn.on('error', handleHostLost);
+    });
+
+    peer.on('error', err => {
+        if (joinTimeout) { clearTimeout(joinTimeout); joinTimeout = null; }
+        if (!connected) {
+            cleanupConnection();
+            updateRoomUI();
+            setStatus('Не в комнате');
+            showError(peerErrorMessage(err));
+        } else {
+            setConnectionBanner(peerErrorMessage(err));
+        }
+    });
+}
+
+function handleGuestMessage(data) {
+    if (!data || typeof data !== 'object') return;
+
+    if (data.t === 'state') {
+        if (!joined) {
+            joined = true;
+            joining = false;
+            isHost = false;
+            roomCode = data.code || roomCode;
+            updateUrlRoom(roomCode);
+            updateRoomUI();
+            setConnectionBanner('');
+        }
+        applySnapshot(data);
+        return;
+    }
+
+    if (data.t === 'welcome') {
+        if (!joined) {
+            joined = true;
+            joining = false;
+            isHost = false;
+        }
+        roomCode = data.code || roomCode;
+        updateUrlRoom(roomCode);
+        updateRoomUI();
+        return;
+    }
+
+    if (data.t === 'toast') {
+        showToast(data.text, data.kind);
+        return;
+    }
+
+    if (data.t === 'error') {
+        showError(data.text);
+        return;
+    }
+
+    if (data.t === 'roomClosed') {
+        setConnectionBanner('Хост закрыл комнату');
+        setTimeout(() => {
+            cleanupConnection();
+            resetClient();
+        }, 1200);
+    }
+}
+
+function guestAnswer(index) {
+    if (!hostConn || !hostConn.open || !roundActive || answeredThisRound) return;
+    if (!Number.isInteger(index)) return;
+    answeredThisRound = true;
+    guestSelectedIndex = index;
+    answerBtns.forEach(b => { b.disabled = true; });
+    const btn = answerBtns[index];
+    if (btn) btn.classList.add('selected');
+    try {
+        hostConn.send({ t: 'answer', index });
+    } catch {}
+}
+
+function cleanupConnection() {
+    if (joinTimeout) { clearTimeout(joinTimeout); joinTimeout = null; }
+    if (hostConn) {
+        try { hostConn.removeAllListeners(); } catch {}
+        try { hostConn.close(); } catch {}
+        hostConn = null;
+    }
+    connections.forEach(conn => {
+        try { conn.removeAllListeners(); } catch {}
+        try { conn.close(); } catch {}
+    });
+    connections = [];
+    if (peer) {
+        try { peer.removeAllListeners(); } catch {}
+        try { peer.destroy(); } catch {}
+        peer = null;
+    }
+    joining = false;
+}
+
+function resetClient() {
+    joined = false;
+    joining = false;
+    isHost = false;
+    myId = null;
+    hostId = null;
+    roomCode = '';
+    players = [];
+    gamePhase = 'lobby';
+    gameStarted = false;
+    gameInProgress = false;
+    roundActive = false;
+    revealRound = false;
+    currentQuestion = null;
+    currentIndex = 0;
+    questionsPlayed = 0;
+    questionsQueue = [];
+    answeredThisRound = false;
+    guestSelectedIndex = null;
+    lastQuestionKey = '';
+    myAlive = true;
+    isSpectator = false;
+    clearAllTimers();
+    stopTimer();
+    if (roundRevealTimer) { clearTimeout(roundRevealTimer); roundRevealTimer = null; }
+    answerToast.style.display = 'none';
+    explainBox.style.display = 'none';
+    setStatusBanner('');
+    setConnectionBanner('');
+    rematchBtn.style.display = 'none';
+    restartBtn.textContent = 'В ЛОББИ';
+    updateUrlRoom('');
+    updateRoomUI();
+    showScreen('lobby');
     handlePlayers(players);
+    setSettingsLocked(false);
+    renderPlayers([]);
+}
+
+function leaveRoom() {
+    if (!joined && !joining) return;
+    if (isHost) {
+        connections.forEach(conn => {
+            if (conn.open) {
+                try { conn.send({ t: 'roomClosed' }); } catch {}
+            }
+        });
+    } else if (hostConn && hostConn.open) {
+        try { hostConn.send({ t: 'leave' }); } catch {}
+    }
+    cleanupConnection();
+    resetClient();
+}
+
+function handleHostLost() {
+    if (!joined || isHost) return;
+    if (!hostConn && !peer) return;
+    setConnectionBanner('Соединение с хостом потеряно');
+    cleanupConnection();
+    setTimeout(() => {
+        resetClient();
+    }, 1500);
+}
+
+function copyRoomLink() {
+    if (!roomCode) return;
+    const url = new URL(location.href);
+    url.searchParams.set('room', roomCode);
+    const text = url.toString();
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text)
+            .then(() => showToast('Ссылка скопирована', 'ok'))
+            .catch(() => fallbackCopy(text));
+    } else {
+        fallbackCopy(text);
+    }
+}
+
+function fallbackCopy(text) {
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.style.position = 'fixed';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.select();
+    try {
+        document.execCommand('copy');
+        showToast('Ссылка скопирована', 'ok');
+    } catch {
+        showError('Не удалось скопировать ссылку');
+    }
+    area.remove();
+}
+
+function renderQuestionCommon(question, num, total) {
+    questionNumEl.textContent = num;
+    totalQuestionsEl.textContent = total;
+    catPill.textContent = CAT_LABELS[question.cat] || 'РАЗНОЕ';
+    diffPill.textContent = DIFF_LABELS[question.diff] || 'СРЕДНИЙ';
+    modePill.textContent = MODE_LABELS[currentMode.id] || 'КЛАССИКА';
+    alivePill.style.display = currentMode.survival ? 'inline-flex' : 'none';
+    alivePill.textContent = `ЖИВЫХ: ${getAlivePlayers().length}`;
+    codeBlock.textContent = question.code;
+    answerBtns.forEach((btn, idx) => {
+        const textEl = document.getElementById('option' + idx);
+        const hasOption = idx < question.options.length;
+        btn.style.display = hasOption ? '' : 'none';
+        btn.disabled = !hasOption;
+        if (textEl) textEl.textContent = hasOption ? question.options[idx] : '';
+    });
+}
+
+function applySnapshot(message) {
+    const game = message.game || {};
+
+    players = Array.isArray(message.players) ? message.players : [];
+    hostId = message.hostId;
+    roomCode = message.code || roomCode;
+    settings = { ...settings, ...(message.settings || {}) };
+    if (Array.isArray(message.settings && message.settings.categories)) {
+        settings.categories = message.settings.categories.slice();
+    }
+    applySettings(settings);
+
+    gameMode = game.mode || settings.mode || 'classic';
+    currentMode = MODES[gameMode] || MODES.classic;
+    gamePhase = message.phase || 'lobby';
+
+    const me = getMe();
+    myAlive = me ? me.alive : true;
+    isSpectator = me ? me.spectator : false;
+
+    if (typeof game.serverNow === 'number') {
+        clockOffset = game.serverNow - Date.now();
+    }
+
+    if (gamePhase === 'lobby') {
+        gameStarted = false;
+        gameInProgress = false;
+        roundActive = false;
+        revealRound = false;
+        answeredThisRound = false;
+        guestSelectedIndex = null;
+        lastQuestionKey = '';
+        currentQuestion = null;
+        stopTimer();
+        showScreen('lobby');
+        handlePlayers(players);
+        updateRoomUI();
+        setSettingsLocked(!isHost);
+        return;
+    }
+
+    if (gamePhase === 'game' || gamePhase === 'reveal') {
+        gameStarted = true;
+        gameInProgress = true;
+        revealRound = gamePhase === 'reveal' || !!game.reveal;
+        roundActive = !revealRound && !!game.question;
+        currentIndex = Math.max(0, (game.questionNum || 1) - 1);
+
+        if (!game.question) {
+            currentQuestion = null;
+            guestSelectedIndex = null;
+            lastQuestionKey = '';
+            answeredThisRound = false;
+            stopTimer();
+            resetAnswerButtons();
+            codeBlock.textContent = '';
+            answerBtns.forEach((btn, idx) => {
+                btn.style.display = '';
+                btn.disabled = true;
+                const textEl = document.getElementById('option' + idx);
+                if (textEl) textEl.textContent = '';
+            });
+            showScreen('game');
+            setStatusBanner('Игра начинается…');
+            timerEl.textContent = '—';
+            timerProg.style.strokeDashoffset = 151;
+            handlePlayers(players);
+            return;
+        }
+
+        currentQuestion = {
+            cat: game.question.cat,
+            diff: game.question.diff,
+            code: game.question.code,
+            options: game.question.options.slice(),
+            timeLimit: game.question.timeLimit || settings.roundTime,
+            correct: typeof game.correctIndex === 'number' ? game.correctIndex : undefined,
+            explain: game.explain || ''
+        };
+
+        renderGuestQuestion(game);
+        showScreen('game');
+        handlePlayers(players);
+        return;
+    }
+
+    if (gamePhase === 'roundEnd') {
+        gameStarted = true;
+        gameInProgress = true;
+        revealRound = true;
+        roundActive = false;
+        stopTimer();
+        if (game.question) {
+            currentQuestion = {
+                cat: game.question.cat,
+                diff: game.question.diff,
+                code: game.question.code,
+                options: game.question.options.slice(),
+                timeLimit: game.question.timeLimit || settings.roundTime,
+                correct: typeof game.correctIndex === 'number' ? game.correctIndex : undefined,
+                explain: game.explain || ''
+            };
+        }
+        renderGuestRoundEnd(game);
+        handlePlayers(players);
+        return;
+    }
+
+    if (gamePhase === 'gameOver') {
+        gameStarted = false;
+        gameInProgress = false;
+        roundActive = false;
+        revealRound = false;
+        guestSelectedIndex = null;
+        lastQuestionKey = '';
+        answeredThisRound = false;
+        stopTimer();
+        clearAllTimers();
+        renderGuestGameOver(game);
+        handlePlayers(players);
+    }
+}
+
+function renderGuestQuestion(game) {
+    const question = game.question;
+    const key = `${game.questionNum}:${question.code}`;
+    if (key !== lastQuestionKey) {
+        lastQuestionKey = key;
+        guestSelectedIndex = null;
+        answeredThisRound = false;
+    }
+
+    const me = getMe();
+    answeredThisRound = !!(me && me.answered) || guestSelectedIndex !== null;
+
+    resetAnswerButtons();
+    renderQuestionCommon(currentQuestion, game.questionNum, game.total || 0);
+
+    answerBtns.forEach((btn, idx) => {
+        btn.classList.remove('selected', 'correct', 'incorrect');
+
+        if (game.reveal) {
+            btn.disabled = true;
+            if (idx === game.correctIndex) btn.classList.add('correct');
+            else if (idx === (me ? me.roundAnswer : null) || idx === guestSelectedIndex) btn.classList.add('incorrect');
+            return;
+        }
+
+        if (me && me.answered) {
+            btn.disabled = true;
+            if (idx === guestSelectedIndex) btn.classList.add('selected');
+            return;
+        }
+
+        btn.disabled = isSpectator || !myAlive;
+    });
+
+    if (game.reveal) {
+        stopTimer();
+        timerEl.textContent = '0';
+        timerProg.style.strokeDashoffset = 151;
+        setStatusBanner(myAlive ? '' : 'Вы выбыли — наблюдаете за игрой');
+    } else if (game.endsAt) {
+        roundDeadline = game.endsAt - clockOffset;
+        startTimer(question.timeLimit || settings.roundTime);
+        if (isSpectator) setStatusBanner('Режим наблюдателя — ответы недоступны');
+        else if (!myAlive) setStatusBanner('Вы выбыли — наблюдаете за игрой');
+        else setStatusBanner('');
+    } else {
+        stopTimer();
+    }
+}
+
+function renderGuestRoundEnd(game) {
+    const me = getMe();
+    const correctIndex = typeof game.correctIndex === 'number' ? game.correctIndex : 0;
+    const correctText = currentQuestion && currentQuestion.options[correctIndex]
+        ? currentQuestion.options[correctIndex]
+        : '';
+    correctAnswerText.textContent = correctText;
+
+    let resultText = 'Время вышло';
+    let resultClass = 'neutral';
+    if (currentMode.survival && me && !me.alive) {
+        resultText = 'Вы выбыли';
+        resultClass = 'bad';
+    } else if (me && me.roundPoints > 0) {
+        resultText = `Верно! +${me.roundPoints} очков`;
+        resultClass = 'good';
+    } else if (me && me.answered) {
+        resultText = 'Неверно';
+        resultClass = 'bad';
+    }
+
+    roundResultText.textContent = resultText;
+    roundResultText.className = `round-result ${resultClass}`;
+    renderBreakdown(players);
+
+    const explain = game.explain || (currentQuestion && currentQuestion.explain) || '';
+    explainText.textContent = explain;
+    explainBox.style.display = explain ? 'block' : 'none';
+    setStatusBanner('');
+    showScreen('roundEnd');
+}
+
+function renderGuestGameOver(game) {
+    const mode = currentMode;
+    const alive = getAlivePlayers().slice().sort((a, b) => b.score - a.score);
+    const ranked = getActivePlayers().slice().sort((a, b) => {
+        if (mode.survival && a.alive !== b.alive) return a.alive ? -1 : 1;
+        return b.score - a.score;
+    });
+    const winner = mode.survival ? (alive[0] || ranked[0] || null) : (ranked[0] || null);
+    const total = game.played || game.total || questionsQueue.length;
+    const modeLabel = MODE_LABELS[mode.id] || 'КЛАССИКА';
+
+    gameOverSub.textContent = winner
+        ? `${modeLabel} • ${total} ${questionsWord(total)} • Победитель: ${winner.name}`
+        : `${modeLabel} • результатов нет`;
+
+    renderPodium(ranked, winner ? winner.id : null);
+    rematchBtn.style.display = 'none';
+    restartBtn.textContent = 'ВЫЙТИ ИЗ КОМНАТЫ';
+    setStatusBanner('');
+    showScreen('gameOver');
 }
 
 function resetPlayersForNewGame() {
@@ -595,7 +1325,8 @@ function getRoundSeconds() {
 }
 
 function startGame() {
-    if (!joined) return showError('Введите имя');
+    if (!isHost) return;
+    if (!joined) return showError('Создайте комнату');
     if (gameInProgress) return;
     if (questionsDB.length === 0) return showError('Вопросы ещё загружаются…');
 
@@ -605,8 +1336,10 @@ function startGame() {
     resetPlayersForNewGame();
     currentMode = MODES[settings.mode] || MODES.classic;
     gameMode = currentMode.id;
+    gamePhase = 'game';
     gameStarted = true;
     gameInProgress = true;
+    roundActive = false;
     revealRound = false;
     answeredThisRound = false;
     currentIndex = 0;
@@ -637,6 +1370,7 @@ function startGame() {
         if (textEl) textEl.textContent = '';
     });
     handlePlayers(players);
+    broadcastState();
 
     if (startDelayTimer) clearTimeout(startDelayTimer);
     startDelayTimer = setTimeout(() => {
@@ -650,6 +1384,7 @@ function startRound() {
     if (currentIndex >= questionsQueue.length) return endGame();
 
     roundActive = true;
+    gamePhase = 'game';
     players.forEach(p => {
         p.answered = false;
         p.roundPoints = 0;
@@ -668,28 +1403,7 @@ function startRound() {
     resetAnswerButtons();
     answerToast.style.display = 'none';
     explainBox.style.display = 'none';
-
-    questionNumEl.textContent = currentIndex + 1;
-    totalQuestionsEl.textContent = questionsQueue.length;
-    catPill.textContent = CAT_LABELS[currentQuestion.cat] || 'РАЗНОЕ';
-    diffPill.textContent = DIFF_LABELS[currentQuestion.diff] || 'СРЕДНИЙ';
-    modePill.textContent = MODE_LABELS[currentMode.id] || 'КЛАССИКА';
-
-    if (currentMode.survival) {
-        alivePill.style.display = 'inline-flex';
-        alivePill.textContent = `ЖИВЫХ: ${getAlivePlayers().length}`;
-    } else {
-        alivePill.style.display = 'none';
-    }
-
-    codeBlock.textContent = currentQuestion.code;
-    answerBtns.forEach((btn, idx) => {
-        const textEl = document.getElementById('option' + idx);
-        const hasOption = idx < currentQuestion.options.length;
-        btn.style.display = hasOption ? '' : 'none';
-        btn.disabled = !hasOption;
-        if (textEl) textEl.textContent = hasOption ? currentQuestion.options[idx] : '';
-    });
+    renderQuestionCommon(currentQuestion, currentIndex + 1, questionsQueue.length);
 
     const me = getMe();
     myAlive = me ? me.alive : true;
@@ -705,53 +1419,14 @@ function startRound() {
     startTimer(seconds);
     setSettingsLocked(true);
     handlePlayers(players);
-    scheduleBots(seconds);
+    broadcastState();
 
     if (questionTimer) clearTimeout(questionTimer);
     questionTimer = setTimeout(endRound, seconds * 1000);
 }
 
-function botCorrectChance(bot) {
-    let chance = bot.skill;
-    if (currentQuestion.diff === 'easy') chance += 0.12;
-    else if (currentQuestion.diff === 'hard') chance -= 0.15;
-    if (currentMode.id === 'blitz') chance -= 0.05;
-    if (currentMode.id === 'survival') chance -= 0.03;
-    return Math.max(0.15, Math.min(0.95, chance));
-}
-
-function scheduleBots(seconds) {
-    clearBotTimers();
-    const aliveBots = getActivePlayers().filter(p => p.isBot && p.alive);
-
-    aliveBots.forEach(bot => {
-        const timeLimitMs = seconds * 1000;
-        const maxDelay = Math.max(1500, timeLimitMs - 700);
-        const factor = 1.15 - bot.skill * 0.5;
-        const delay = Math.min(maxDelay, Math.max(900, 900 + Math.random() * Math.max(0, maxDelay - 900) * factor));
-
-        const timer = setTimeout(() => {
-            if (!roundActive || !gameStarted || bot.answered || !bot.alive || !currentQuestion) return;
-
-            let index;
-            if (Math.random() < botCorrectChance(bot)) {
-                index = currentQuestion.correct;
-            } else {
-                const wrong = [];
-                for (let i = 0; i < currentQuestion.options.length; i++) {
-                    if (i !== currentQuestion.correct) wrong.push(i);
-                }
-                index = wrong[Math.floor(Math.random() * wrong.length)];
-            }
-
-            submitAnswer(bot, index);
-        }, delay);
-
-        botTimers.push(timer);
-    });
-}
-
-function submitAnswer(player, index) {
+function submitAnswer(player, index, fromNetwork) {
+    if (!isHost) return;
     if (!roundActive || !player || player.spectator || !player.alive || player.answered || !currentQuestion) return;
 
     const optionCount = currentQuestion.options.length;
@@ -785,9 +1460,18 @@ function submitAnswer(player, index) {
             const dead = currentMode.survival ? ' — вы выбыли' : '';
             showToast(`Неверно${dead}`, 'bad');
         }
+    } else if (fromNetwork) {
+        if (player.roundCorrect) {
+            const streak = player.streak + 1 > 1 ? ` · серия ×${player.streak + 1}` : '';
+            sendTo(player.id, { t: 'toast', kind: 'ok', text: `+${points}${streak}` });
+        } else {
+            const dead = currentMode.survival ? ' — вы выбыли' : '';
+            sendTo(player.id, { t: 'toast', kind: 'bad', text: `Неверно${dead}` });
+        }
     }
 
     handlePlayers(players);
+    broadcastState();
     checkRoundEnd();
 }
 
@@ -801,9 +1485,9 @@ function checkRoundEnd() {
 function endRound() {
     if (!roundActive || !currentQuestion) return;
     roundActive = false;
+    gamePhase = 'reveal';
     questionsPlayed += 1;
     if (questionTimer) { clearTimeout(questionTimer); questionTimer = null; }
-    clearBotTimers();
 
     const aliveBefore = new Set(getAlivePlayers().map(p => p.id));
 
@@ -831,6 +1515,8 @@ function endRound() {
         : [];
 
     stopTimer();
+    timerEl.textContent = '0';
+    timerProg.style.strokeDashoffset = 151;
     revealRound = true;
     answeredThisRound = true;
 
@@ -866,11 +1552,16 @@ function endRound() {
     explainBox.style.display = currentQuestion.explain ? 'block' : 'none';
 
     handlePlayers(players);
+    broadcastState();
 
     if (roundRevealTimer) clearTimeout(roundRevealTimer);
     roundRevealTimer = setTimeout(() => {
         roundRevealTimer = null;
-        if (gameInProgress) showScreen('roundEnd');
+        if (gameInProgress) {
+            gamePhase = 'roundEnd';
+            showScreen('roundEnd');
+            broadcastState();
+        }
     }, 800);
 
     if (nextRoundTimer) clearTimeout(nextRoundTimer);
@@ -884,8 +1575,9 @@ function endRound() {
 }
 
 function endGame() {
-    if (!gameStarted) return;
+    if (!isHost || !gameStarted) return;
 
+    gamePhase = 'gameOver';
     gameStarted = false;
     gameInProgress = false;
     roundActive = false;
@@ -912,11 +1604,15 @@ function endGame() {
     showScreen('gameOver');
     handlePlayers(players);
     rematchBtn.style.display = 'inline-flex';
+    restartBtn.textContent = 'В ЛОББИ';
     setSettingsLocked(false);
     answerToast.style.display = 'none';
+    broadcastState();
 }
 
 function backToLobby() {
+    if (!isHost) return;
+    gamePhase = 'lobby';
     gameStarted = false;
     gameInProgress = false;
     roundActive = false;
@@ -948,13 +1644,15 @@ function backToLobby() {
     });
 
     rematchBtn.style.display = 'none';
+    restartBtn.textContent = 'В ЛОББИ';
     showScreen('lobby');
     handlePlayers(players);
     setSettingsLocked(false);
+    broadcastState();
 }
 
 function rematch() {
-    if (gameInProgress) return;
+    if (!isHost || gameInProgress) return;
     backToLobby();
     setTimeout(() => {
         if (!gameInProgress) startGame();
@@ -995,7 +1693,7 @@ function loadQuestions() {
             });
 
             allowedCats = [...new Set(questionsDB.map(q => q.cat))];
-            settings.categories = allowedCats.slice();
+            if (!joined || isHost) settings.categories = allowedCats.slice();
             applySettings(settings);
             handlePlayers(players);
             showError('');
@@ -1007,14 +1705,30 @@ function loadQuestions() {
         });
 }
 
-joinBtn.addEventListener('click', joinGame);
+createRoomBtn.addEventListener('click', createRoom);
+joinRoomBtn.addEventListener('click', joinRoom);
+copyLinkBtn.addEventListener('click', copyRoomLink);
+leaveRoomBtn.addEventListener('click', leaveRoom);
 
 playerNameInput.addEventListener('keydown', e => {
-    if (e.key === 'Enter') joinBtn.click();
+    if (e.key !== 'Enter') return;
+    if (roomCodeInput.value.trim()) joinRoom();
+    else createRoom();
+});
+
+roomCodeInput.addEventListener('input', () => {
+    roomCodeInput.value = normalizeRoomCode(roomCodeInput.value);
+});
+
+roomCodeInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') joinRoom();
 });
 
 startBtn.addEventListener('click', startGame);
-restartBtn.addEventListener('click', backToLobby);
+restartBtn.addEventListener('click', () => {
+    if (!isHost && joined) leaveRoom();
+    else backToLobby();
+});
 rematchBtn.addEventListener('click', rematch);
 
 document.querySelectorAll('.seg').forEach(group => {
@@ -1022,40 +1736,32 @@ document.querySelectorAll('.seg').forEach(group => {
         const target = e.target.closest('.seg-item');
         if (!target || target.disabled) return;
         if (gameInProgress) return showError('Настройки недоступны во время игры');
+        if (joined && !isHost) return showError('Настройки меняет хост');
 
         const key = group.getAttribute('data-setting');
         const raw = target.getAttribute('data-value');
         let value = raw;
 
-        if (key === 'roundTime' || key === 'bots') {
-            value = Number(raw);
-        }
+        if (key === 'roundTime') value = Number(raw);
         if (key === 'mode' && !MODES[value]) return;
         if (key === 'difficulty' && !ALLOWED_DIFFS.includes(value)) return;
         if (key === 'theme' && !ALLOWED_THEMES.includes(value)) return;
-        if (key === 'bots') value = Math.max(1, Math.min(11, value));
 
         group.querySelectorAll('.seg-item').forEach(b => b.classList.remove('active'));
         target.classList.add('active');
 
-        if (key === 'bots') {
-            settings.bots = value;
-            if (joined) {
-                rebuildBots();
-                handlePlayers(players);
-            }
-        } else {
-            settings[key] = value;
-            if (key === 'theme') {
-                document.documentElement.dataset.theme = value;
-                storageSet('cg_theme', value);
-            }
-            if (key === 'mode') {
-                gameMode = value;
-                modeDesc.textContent = MODE_DESC[value] || '';
-            }
+        settings[key] = value;
+        if (key === 'theme') {
+            document.documentElement.dataset.theme = value;
+            storageSet('cg_theme', value);
+        }
+        if (key === 'mode') {
+            gameMode = value;
+            currentMode = MODES[value] || currentMode;
+            modeDesc.textContent = MODE_DESC[value] || '';
         }
 
+        if (isHost) broadcastState();
         showError('');
     });
 });
@@ -1066,6 +1772,10 @@ document.querySelectorAll('.checks input').forEach(cb => {
             cb.checked = !cb.checked;
             return showError('Настройки недоступны во время игры');
         }
+        if (joined && !isHost) {
+            cb.checked = !cb.checked;
+            return showError('Настройки меняет хост');
+        }
 
         const cats = [];
         document.querySelectorAll('.checks input:checked').forEach(c => cats.push(c.getAttribute('data-cat')));
@@ -1074,6 +1784,7 @@ document.querySelectorAll('.checks input').forEach(cb => {
             return showError('Выберите хотя бы одну категорию');
         }
         settings.categories = cats;
+        if (isHost) broadcastState();
         showError('');
     });
 });
@@ -1082,9 +1793,14 @@ answerBtns.forEach(btn => {
     btn.addEventListener('click', () => {
         if (btn.disabled || answeredThisRound) return;
         if (!gameInProgress || !roundActive || !myAlive || isSpectator) return;
-        const me = getMe();
-        if (!me || me.answered) return;
-        submitAnswer(me, Number(btn.getAttribute('data-index')));
+        const index = Number(btn.getAttribute('data-index'));
+        if (isHost) {
+            const me = getMe();
+            if (!me || me.answered) return;
+            submitAnswer(me, index);
+        } else {
+            guestAnswer(index);
+        }
     });
 });
 
@@ -1101,7 +1817,6 @@ document.addEventListener('keydown', e => {
     }
 });
 
-serverAddr.textContent = 'GitHub Pages • без сервера';
 playerNameInput.value = storageGet('cg_name') || '';
 
 const savedTheme = storageGet('cg_theme');
@@ -1109,8 +1824,30 @@ if (ALLOWED_THEMES.includes(savedTheme)) {
     settings.theme = savedTheme;
 }
 
+const initialRoom = normalizeRoomCode(new URLSearchParams(location.search).get('room') || '');
+if (initialRoom) roomCodeInput.value = initialRoom;
+
 applySettings(settings);
+updateRoomUI();
 showScreen('lobby');
 renderPlayers([]);
 updateHostUI([]);
 loadQuestions();
+
+if (initialRoom) {
+    if (playerNameInput.value) {
+        setTimeout(() => joinRoom(), 300);
+    } else {
+        showError(`Введите имя, чтобы войти в комнату ${initialRoom}`);
+        playerNameInput.focus();
+    }
+}
+
+window.addEventListener('beforeunload', () => {
+    if (!isHost) return;
+    connections.forEach(conn => {
+        if (conn.open) {
+            try { conn.send({ t: 'roomClosed' }); } catch {}
+        }
+    });
+});
